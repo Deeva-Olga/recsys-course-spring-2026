@@ -68,4 +68,4 @@ class Experiments:
     HSTU = Experiment("HSTU", Split.HALF_HALF)
 
     def __init__(self):
-        self.experiments = [Experiments.HSTU]
+       self.experiments = [Experiments.SESSIONPOP]
