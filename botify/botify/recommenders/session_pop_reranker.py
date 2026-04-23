@@ -7,12 +7,12 @@ import math
 from collections import Counter
 from .recommender import Recommender
 
-# Уникальные параметры (отличаются от одногруппников)
-MAX_CANDIDATES = 35          # Не 30, не 40, не 50
-RECENCY_DECAY = 0.85         # Не 0.7, не 0.9
-ARTIST_PENALTY_BASE = 0.18   # Не 0.25, не 0.35
-POPULARITY_BONUS = 0.12      # Уникальная фича
-MIN_LISTEN_TIME = 0.4        # Порог для "хорошего" прослушивания
+
+MAX_CANDIDATES = 35
+RECENCY_DECAY = 0.85
+ARTIST_PENALTY_BASE = 0.18
+POPULARITY_BONUS = 0.12
+MIN_LISTEN_TIME = 0.4
 
 
 class SessionPopReranker(Recommender):
@@ -23,7 +23,7 @@ class SessionPopReranker(Recommender):
         
         # Извлекаем артистов и "популярность" из каталога
         self.track_artist = {}
-        self.track_pop_rank = {}  # Чем меньше = популярнее
+        self.track_pop_rank = {}
         
         for idx, track in enumerate(catalog.tracks):
             tid = int(track.track)
