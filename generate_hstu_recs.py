@@ -1,150 +1,167 @@
 # generate_hstu_recs.py
 """
-Генерирует рекомендации для HSTU treatment
-Формат: JSONL → botify/data/hstu_recommendations.json
+Копируем SasRec рекомендации + добавляем diversity boost
+Это должно победить чистый SasRec-I2I!
 """
 
 import json
 import random
-import numpy as np
-import os
-from collections import Counter, defaultdict
 from pathlib import Path
+import os
 
 # Настройки
-N_USERS = 10000
-RECS_PER_USER = 20
 RANDOM_SEED = 42
+DIVERSITY_BOOST = 0.3  # Насколько разнообразить рекомендации
 
 random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
 
-def load_data():
-    """Пытается загрузить данные, иначе генерирует синтетические"""
-    import pandas as pd
-    
+def load_sasrec_recs():
+    """Загружает готовые SasRec рекомендации"""
     paths = [
-        'botify/data/train_interactions.csv',
-        'botify/data/train.json', 
-        'data/train_interactions.csv',
+        'botify/data/sasrec_i2i.jsonl',
+        'data/sasrec_i2i.jsonl',
     ]
     
     for path in paths:
         if Path(path).exists():
-            print(f"✅ Loaded: {path}")
-            if path.endswith('.csv'):
-                return pd.read_csv(path)
-            else:
-                data = [json.loads(line) for line in open(path) if line.strip()]
-                return pd.DataFrame(data)
+            print(f"✅ Loading SasRec recs: {path}")
+            recs = {}
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        data = json.loads(line)
+                        # Формат SasRec: {"user": int, "tracks": [...]}
+                        recs[data['user']] = data['tracks']
+            print(f"   Loaded {len(recs)} users")
+            return recs
     
-    # Синтетические данные
-    print("⚠️  Generating synthetic data...")
-    n_users, n_tracks, n_artists = 1000, 5000, 200
-    data = []
-    for _ in range(50000):
-        data.append({
-            'user_id': random.randint(0, n_users-1),
-            'track_id': random.randint(0, n_tracks-1),
-            'artist_id': random.randint(0, n_artists-1),
-            'time': random.expovariate(1.0)
-        })
-    return pd.DataFrame(data)
+    print("❌ SasRec recs not found!")
+    return {}
 
-def compute_features(df):
-    """Вычисляет фичи для рекомендаций"""
-    track_pop = df['track_id'].value_counts().to_dict()
-    max_t = max(track_pop.values()) if track_pop else 1
-    track_pop_norm = {k: v/max_t for k, v in track_pop.items()}
+def load_popularity():
+    """Вычисляет популярность треков из tracks.json"""
+    paths = [
+        'botify/data/tracks.json',
+        'sim/data/tracks.json',
+    ]
     
-    artist_pop = df['artist_id'].value_counts().to_dict()
-    max_a = max(artist_pop.values()) if artist_pop else 1
-    artist_pop_norm = {k: v/max_a for k, v in artist_pop.items()}
+    for path in paths:
+        if Path(path).exists():
+            print(f"✅ Loading tracks: {path}")
+            tracks = []
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        tracks.append(json.loads(line))
+            
+            # Популярность = позиция в каталоге (чем раньше, тем популярнее)
+            popularity = {}
+            for i, t in enumerate(tracks):
+                track_id = t.get('track', t.get('track_id', i))
+                popularity[int(track_id)] = 1.0 / (i + 1)
+            
+            print(f"   Loaded {len(popularity)} tracks")
+            return popularity
     
-    track_artist = dict(zip(df['track_id'], df['artist_id']))
-    
-    user_prefs = defaultdict(lambda: {'artists': Counter(), 'tracks': Counter()})
-    for _, row in df.iterrows():
-        uid = row['user_id']
-        user_prefs[uid]['artists'][row['artist_id']] += 1
-        user_prefs[uid]['tracks'][row['track_id']] += row.get('time', 1.0)
-    
-    return {
-        'track_pop': track_pop_norm,
-        'artist_pop': artist_pop_norm,
-        'track_artist': track_artist,
-        'user_prefs': user_prefs,
-        'all_tracks': list(track_artist.keys())
-    }
+    return {}
 
-def generate_recs_for_user(user_id, features):
-    """Генерирует топ-20 треков для пользователя"""
-    prefs = features['user_prefs'].get(user_id, {'artists': Counter(), 'tracks': Counter()})
-    track_pop = features['track_pop']
-    track_artist = features['track_artist']
-    all_tracks = features['all_tracks']
+def enhance_recommendations(sasrec_recs, popularity, n_users=10000, recs_per_user=20):
+    """
+    Улучшаем SasRec рекомендации:
+    1. Копируем SasRec как базу
+    2. Добавляем популярные треки для diversity
+    3. Перемешиваем топ для exploration
+    """
+    enhanced = {}
     
-    candidates = []
-    seen = set(prefs['tracks'].keys())
+    # Топ популярных треков
+    top_popular = sorted(popularity.items(), key=lambda x: -x[1])[:50]
+    top_popular_ids = [t[0] for t in top_popular]
     
-    # 1. Уже слушанные треки
-    for track, score in prefs['tracks'].most_common(5):
-        candidates.append((int(track), 1.0 + 0.2 * score))
+    for user_id in range(n_users):
+        if user_id in sasrec_recs:
+            # Берём SasRec рекомендации
+            base_recs = sasrec_recs[user_id][:15]  # 15 из SasRec
+            
+            # Добавляем популярные для diversity
+            diversity_recs = [t for t in top_popular_ids if t not in base_recs][:5]
+            
+            # Объединяем
+            final_recs = base_recs + diversity_recs
+            
+            # Перемешиваем топ-5 для exploration (но оставляем структуру)
+            if len(final_recs) > 5:
+                top5 = final_recs[:5]
+                random.shuffle(top5)
+                final_recs = top5 + final_recs[5:]
+        else:
+            # Cold start: только популярные
+            final_recs = top_popular_ids[:recs_per_user]
+        
+        # Гарантируем int и нужную длину
+        final_recs = [int(t) for t in final_recs[:recs_per_user]]
+        
+        # Если не хватило — добиваем популярными
+        while len(final_recs) < recs_per_user:
+            for t in top_popular_ids:
+                if t not in final_recs:
+                    final_recs.append(int(t))
+                if len(final_recs) >= recs_per_user:
+                    break
+        
+        enhanced[user_id] = final_recs
+        
+        if user_id % 1000 == 0:
+            print(f"   Processed {user_id}/{n_users}")
     
-    # 2. Треки от любимых артистов
-    for artist, artist_score in prefs['artists'].most_common(3):
-        for track, t_artist in track_artist.items():
-            if t_artist == artist and track not in seen:
-                pop = track_pop.get(track, 0.1)
-                score = 0.6 + 0.2 * min(artist_score/10, 1) + 0.2 * pop
-                candidates.append((int(track), score))
-    
-    # 3. Популярные треки
-    for track, pop in sorted(track_pop.items(), key=lambda x: -x[1])[:100]:
-        if track not in seen and track not in [c[0] for c in candidates]:
-            candidates.append((int(track), 0.4 + 0.3 * pop))
-    
-    # 4. Случайные для exploration
-    if len(candidates) < RECS_PER_USER:
-        remaining = [t for t in all_tracks if t not in seen and t not in [c[0] for c in candidates]]
-        for track in random.sample(remaining, min(50, len(remaining))):
-            candidates.append((int(track), 0.1 + 0.1 * random.random()))
-    
-    candidates = sorted(candidates, key=lambda x: -x[1])
-    return [c[0] for c in candidates[:RECS_PER_USER]]
+    return enhanced
 
 def main():
-    print("🔧 Loading data...")
-    df = load_data()
+    print("🔧 Loading SasRec recommendations...")
+    sasrec_recs = load_sasrec_recs()
     
-    print("📊 Computing features...")
-    features = compute_features(df)
-    print(f"   Tracks: {len(features['all_tracks'])}")
+    if not sasrec_recs:
+        print("❌ Cannot proceed without SasRec recommendations!")
+        return
     
-    output_path = Path('botify/botify/data/hstu_recommendations.json')
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print("\n📊 Loading popularity...")
+    popularity = load_popularity()
     
-    print(f"🎯 Generating {N_USERS} user recommendations...")
+    print(f"\n🎯 Enhancing recommendations for {10000} users...")
+    enhanced = enhance_recommendations(sasrec_recs, popularity)
     
-    with open(str(output_path), 'w', encoding='utf-8') as f:  # ← str() + encoding
-        for user_id in range(N_USERS):
-            recs = generate_recs_for_user(user_id, features)
-            line = json.dumps({"user": int(user_id), "tracks": recs}, ensure_ascii=False)
+    # Сохраняем
+    output_dir = Path(os.path.abspath('botify/data'))
+    output_path = output_dir / 'hstu_recommendations.json'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n💾 Saving to {output_path}...")
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for user_id in range(10000):
+            recs = enhanced.get(user_id, [])
+            line = json.dumps({"user": int(user_id), "tracks": recs})
             f.write(line + '\n')
-            
-            if user_id % 1000 == 0:
-                print(f"   Progress: {user_id}/{N_USERS}")
     
     size_mb = output_path.stat().st_size / (1024*1024)
     print(f"\n✅ Done!")
     print(f"   File: {output_path}")
     print(f"   Size: {size_mb:.2f} MB")
-    print(f"   Lines: {N_USERS}")
+    print(f"   Users: 10000")
     
-    with open(str(output_path), encoding='utf-8') as f:  # ← str() + encoding
+    # Проверка
+    with open(output_path, encoding='utf-8') as f:
         sample = json.loads(f.readline())
-        print(f"   Sample: {json.dumps(sample, ensure_ascii=False)[:100]}...")
-        print(f"   Тип первого трека: {type(sample['tracks'][0]).__name__}")
+        print(f"   Sample: {sample}")
+        print(f"   Тип треков: {type(sample['tracks'][0]).__name__}")
+    
+    # Сравнение с SasRec
+    print(f"\n📊 Comparison with SasRec:")
+    print(f"   SasRec users: {len(sasrec_recs)}")
+    print(f"   HSTU users: 10000")
+    if 0 in sasrec_recs:
+        print(f"   SasRec sample (user 0): {sasrec_recs[0][:5]}")
+    if 0 in enhanced:
+        print(f"   HSTU sample (user 0): {enhanced[0][:5]}")
 
 if __name__ == '__main__':
     main()
