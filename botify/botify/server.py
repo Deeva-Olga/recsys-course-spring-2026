@@ -126,7 +126,8 @@ class NextTrack(Resource):
         if treatment == Treatment.C:
             recommender = sasrec_i2i_recommender
         elif treatment == Treatment.T1:
-            recommender = session_pop_reranker #Indexed(recommendations_hstu_redis.connection, catalog, random_recommender)
+            #recommender = session_pop_reranker 
+            recommender = Indexed(recommendations_hstu_redis.connection, catalog, random_recommender)
         else:
             recommender = random_recommender
 
